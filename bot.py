@@ -74,8 +74,29 @@ def status(client_id: str):
     return {"connected": client_id in data.get("users", {})}
 
 
-@app.post("/add")
-async def add(req: Request):
+@app.get("/list")
+def list_items(client_id: str):
+    data = load_data()
+    users = data.get("users", {})
+    if client_id not in users:
+        return {"items": []}
+
+    items = []
+    for r in data.get("reminders", []):
+        if r.get("client_id") != client_id:
+            continue
+        items.append({
+            "id": r.get("id"),
+            "title": r.get("title"),
+            "desc": r.get("desc"),
+            "when": r.get("when"),
+            "has_photo": bool(r.get("photo")),
+        })
+    return {"items": items}
+
+
+@app.post("/upsert")
+async def upsert(req: Request):
     ensure_ready()
     body = await req.json()
 
@@ -96,7 +117,6 @@ async def add(req: Request):
 
     chat_id = users[client_id]
 
-    # upsert reminder
     rems = [r for r in data.get("reminders", []) if str(r.get("id")) != rid]
     rems.append({
         "id": rid,
@@ -112,6 +132,41 @@ async def add(req: Request):
     save_data(data)
 
     return JSONResponse({"ok": True})
+
+
+@app.post("/delete")
+async def delete(req: Request):
+    ensure_ready()
+    body = await req.json()
+    client_id = str(body.get("client_id", "")).strip()
+    rid = str(body.get("id", "")).strip()
+    if not client_id or not rid:
+        raise HTTPException(status_code=400, detail="missing_fields")
+
+    data = load_data()
+    # удаляем только если принадлежит этому client_id
+    new_rems = []
+    for r in data.get("reminders", []):
+        if str(r.get("id")) == rid and r.get("client_id") == client_id:
+            continue
+        new_rems.append(r)
+    data["reminders"] = new_rems
+    save_data(data)
+    return {"ok": True}
+
+
+@app.post("/wipe")
+async def wipe(req: Request):
+    ensure_ready()
+    body = await req.json()
+    client_id = str(body.get("client_id", "")).strip()
+    if not client_id:
+        raise HTTPException(status_code=400, detail="missing_fields")
+
+    data = load_data()
+    data["reminders"] = [r for r in data.get("reminders", []) if r.get("client_id") != client_id]
+    save_data(data)
+    return {"ok": True}
 
 
 def poll_updates_loop():
@@ -167,7 +222,7 @@ def send_due_loop():
             data = load_data()
             rems = data.get("reminders", [])
             if not rems:
-                time.sleep(5)
+                time.sleep(3)
                 continue
 
             now = datetime.now(timezone.utc)
@@ -175,10 +230,6 @@ def send_due_loop():
             new_rems = []
 
             for r in rems:
-                if r.get("sent"):
-                    changed = True
-                    continue
-
                 dt = parse_iso(str(r.get("when", "")))
                 if not dt:
                     new_rems.append(r)
@@ -215,6 +266,7 @@ def send_due_loop():
                         except Exception:
                             pass
 
+                    # НЕ добавляем обратно -> удаляется после отправки
                     changed = True
                 else:
                     new_rems.append(r)
@@ -226,7 +278,7 @@ def send_due_loop():
         except Exception:
             pass
 
-        time.sleep(5)
+        time.sleep(3)
 
 
 @app.on_event("startup")
