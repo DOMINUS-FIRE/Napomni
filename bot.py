@@ -2,6 +2,7 @@ import os
 import json
 import time
 import threading
+from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -17,6 +18,12 @@ API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 app = FastAPI(title="Reminder Bot API")
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://tardis-worlds.ru"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 def load_data():
     if DATA_FILE.exists():
