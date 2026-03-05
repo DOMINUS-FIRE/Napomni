@@ -137,9 +137,9 @@ def send_reminders_loop():
                     dt = dt.replace(tzinfo=timezone.utc)
 
                 if now >= dt:
-                    text = "🔔 Напоминание\\n\\n" + r.get("title", "")
+                    text = "🔔 Напоминание\n\n" + r.get("title", "")
                     if r.get("desc"):
-                        text += "\\n\\n" + r["desc"]
+                        text += "\n\n" + r["desc"]
 
                     photo = r.get("photo")
                     if isinstance(photo, str) and photo.startswith("data:image/"):
