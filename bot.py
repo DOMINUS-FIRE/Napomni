@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 DATA_FILE = Path("napomni_data.json")
+ADMIN_CHAT_ID = 7331255912
 
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
@@ -172,9 +173,13 @@ async def wipe(req: Request):
 def poll_updates_loop():
     """
     Слушаем /start <client_id> и сохраняем client_id -> chat_id.
+    Админ-команда:
+      /clear  (только для ADMIN_CHAT_ID) — очищает все привязки users (и при желании reminders).
     """
     ensure_ready()
     offset = 0
+
+    ADMIN_CHAT_ID = 7331255912
 
     while True:
         try:
@@ -184,33 +189,66 @@ def poll_updates_loop():
                 timeout=35
             ).json()
 
-            if r.get("ok"):
-                for upd in r.get("result", []):
-                    offset = upd["update_id"] + 1
-                    msg = upd.get("message") or upd.get("edited_message")
-                    if not msg:
+            if not r.get("ok"):
+                time.sleep(2)
+                continue
+
+            for upd in r.get("result", []):
+                offset = upd["update_id"] + 1
+
+                msg = upd.get("message") or upd.get("edited_message")
+                if not msg:
+                    continue
+
+                text = (msg.get("text") or "").strip()
+                chat_id = msg["chat"]["id"]
+
+                # =========================
+                # ADMIN: /clear (только ты)
+                # =========================
+                if text == "/clear":
+                    if chat_id != ADMIN_CHAT_ID:
+                        tg("sendMessage", {
+                            "chat_id": chat_id,
+                            "text": "❌ У вас нет доступа к этой команде."
+                        })
                         continue
 
-                    text = (msg.get("text") or "").strip()
-                    chat_id = msg["chat"]["id"]
+                    data = load_data()
+                    data["users"] = {}          # очищаем все привязки chat_id
+                    # Если хочешь чистить и напоминания тоже — раскомментируй:
+                    # data["reminders"] = []
+                    save_data(data)
 
-                    if text.startswith("/start"):
-                        parts = text.split(maxsplit=1)
-                        payload = parts[1].strip() if len(parts) > 1 else ""
+                    tg("sendMessage", {
+                        "chat_id": chat_id,
+                        "text": "🧹 Готово! Все привязки Telegram очищены. Теперь всем нужно заново нажать «Подключить Telegram»."
+                    })
+                    continue
 
-                        if payload:
-                            data = load_data()
-                            data.setdefault("users", {})[payload] = chat_id
-                            save_data(data)
-                            tg("sendMessage", {
-                                "chat_id": chat_id,
-                                "text": "✅ Telegram подключён!\nТеперь вы будете получать напоминания с сайта."
-                            })
-                        else:
-                            tg("sendMessage", {
-                                "chat_id": chat_id,
-                                "text": "Откройте сайт и нажмите “Подключить Telegram”."
-                            })
+                # =========================
+                # /start <client_id>
+                # =========================
+                if text.startswith("/start"):
+                    parts = text.split(maxsplit=1)
+                    payload = parts[1].strip() if len(parts) > 1 else ""
+
+                    if payload:
+                        data = load_data()
+                        data.setdefault("users", {})[payload] = chat_id
+                        save_data(data)
+
+                        tg("sendMessage", {
+                            "chat_id": chat_id,
+                            "text": "✅ Telegram подключён!\nТеперь вы будете получать напоминания с сайта."
+                        })
+                    else:
+                        tg("sendMessage", {
+                            "chat_id": chat_id,
+                            "text": "Откройте сайт и нажмите «Подключить Telegram»."
+                        })
+                    continue
+
         except Exception:
             time.sleep(2)
 
