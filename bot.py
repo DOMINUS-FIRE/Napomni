@@ -6,21 +6,35 @@ import threading
 import base64
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional, Dict, Any
+
+# Импорты для ASGI-сервера
+try:
+    from fastapi import FastAPI, HTTPException, Request
+    from fastapi.responses import JSONResponse
+    from fastapi.middleware.cors import CORSMiddleware
+except ImportError as e:
+    print(f"! Ошибка импорта FastAPI: {e}")
+    print("! Убедитесь, что fastapi установлен: pip install fastapi uvicorn")
+    sys.exit(1)
+
 import requests
 
-# Токен бота (вставлен ваш токен)
-BOT_TOKEN = "8426233676:AAGPALZ6pA8hLQERcD5oUxkRjzp0GqE2ej8"
+# ========== НАСТРОЙКИ ==========
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8426233676:AAGPALZ6pA8hLQERcD5oUxkRjzp0GqE2ej8")  # Токен из переменных окружения
 DATA_FILE = Path("napomni_data.json")
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 print("=" * 50)
-print("Napomni Telegram Bot")
+print("Napomni Telegram Bot (ASGI-версия)")
 print("=" * 50)
 print(f"Токен: {BOT_TOKEN[:10]}...")
 print(f"Файл данных: {DATA_FILE.absolute()}")
 print("=" * 50)
 
-def load_data():
+# ========== ОСНОВНЫЕ ФУНКЦИИ ==========
+def load_data() -> Dict[str, Any]:
+    """Загрузка данных из JSON-файла"""
     if DATA_FILE.exists():
         try:
             return json.loads(DATA_FILE.read_text(encoding="utf-8"))
@@ -28,10 +42,12 @@ def load_data():
             print(f"Ошибка загрузки: {e}")
     return {"users": {}, "reminders": []}
 
-def save_data(data):
+def save_data(data: Dict[str, Any]):
+    """Сохранение данных в JSON-файл"""
     DATA_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
-def tg_send_message(chat_id, text):
+def tg_send_message(chat_id: int, text: str) -> dict:
+    """Отправка текстового сообщения через Telegram API"""
     try:
         r = requests.post(f"{API}/sendMessage", json={
             "chat_id": chat_id,
@@ -40,10 +56,11 @@ def tg_send_message(chat_id, text):
         }, timeout=10)
         return r.json()
     except Exception as e:
-        print(f"Ошибка отправки: {e}")
+        print(f"Ошибка отправки сообщения: {e}")
         return {"ok": False}
 
-def tg_send_photo(chat_id, photo_bytes, caption):
+def tg_send_photo(chat_id: int, photo_bytes: bytes, caption: str) -> dict:
+    """Отправка фото через Telegram API"""
     try:
         files = {"photo": ("photo.jpg", photo_bytes)}
         r = requests.post(f"{API}/sendPhoto", data={
@@ -55,15 +72,157 @@ def tg_send_photo(chat_id, photo_bytes, caption):
         print(f"Ошибка отправки фото: {e}")
         return {"ok": False}
 
-def parse_iso(iso_str):
+def parse_iso(iso_str: str):
+    """Парсинг ISO даты"""
     try:
         s = iso_str.replace("Z", "+00:00")
         return datetime.fromisoformat(s)
     except Exception:
         return None
 
-def check_reminders():
-    """Проверяет и отправляет просроченные напоминания"""
+# ========== СОЗДАНИЕ FASTAPI APP ==========
+app = FastAPI(title="Napomni API")
+
+# Добавляем CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ========== ЭНДПОИНТЫ FASTAPI ==========
+@app.get("/")
+async def root():
+    return {
+        "status": "ok",
+        "service": "Napomni Bot",
+        "time": datetime.now().isoformat()
+    }
+
+@app.get("/ping")
+async def ping():
+    return {"ok": True, "time": datetime.now().isoformat()}
+
+@app.get("/status")
+async def status(client_id: str):
+    """Проверка подключения пользователя"""
+    data = load_data()
+    return {"connected": client_id in data.get("users", {})}
+
+@app.get("/list")
+async def list_items(client_id: str):
+    """Получение списка напоминаний пользователя"""
+    data = load_data()
+    users = data.get("users", {})
+    if client_id not in users:
+        return {"items": []}
+
+    items = []
+    for r in data.get("reminders", []):
+        if r.get("client_id") != client_id:
+            continue
+        if not r.get("completed", False):
+            items.append({
+                "id": r.get("id"),
+                "title": r.get("title"),
+                "desc": r.get("desc"),
+                "when": r.get("when"),
+                "has_photo": bool(r.get("photo")),
+            })
+    return {"items": items}
+
+@app.post("/upsert")
+async def upsert(req: Request):
+    """Создание или обновление напоминания"""
+    try:
+        body = await req.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid_json")
+
+    client_id = str(body.get("client_id", "")).strip()
+    rid = str(body.get("id", "")).strip()
+    title = str(body.get("title", "")).strip()
+    desc = str(body.get("desc", "")).strip()
+    when = str(body.get("when", "")).strip()
+    photo = body.get("photo")
+
+    if not client_id or not rid or not title or not when:
+        raise HTTPException(status_code=400, detail="missing_fields")
+
+    data = load_data()
+    users = data.get("users", {})
+    if client_id not in users:
+        raise HTTPException(status_code=409, detail="not_connected")
+
+    chat_id = users[client_id]
+
+    # Удаляем старое напоминание
+    rems = [r for r in data.get("reminders", []) if str(r.get("id")) != rid]
+    
+    # Добавляем новое
+    rems.append({
+        "id": rid,
+        "client_id": client_id,
+        "chat_id": chat_id,
+        "title": title,
+        "desc": desc,
+        "when": when,
+        "photo": photo,
+        "completed": False,
+        "created_at": datetime.now().isoformat()
+    })
+    
+    data["reminders"] = rems
+    save_data(data)
+
+    return JSONResponse({"ok": True})
+
+@app.post("/delete")
+async def delete(req: Request):
+    """Удаление напоминания"""
+    try:
+        body = await req.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid_json")
+        
+    client_id = str(body.get("client_id", "")).strip()
+    rid = str(body.get("id", "")).strip()
+    
+    if not client_id or not rid:
+        raise HTTPException(status_code=400, detail="missing_fields")
+
+    data = load_data()
+    new_rems = []
+    for r in data.get("reminders", []):
+        if str(r.get("id")) == rid and r.get("client_id") == client_id:
+            continue
+        new_rems.append(r)
+    
+    data["reminders"] = new_rems
+    save_data(data)
+    return {"ok": True}
+
+@app.post("/wipe")
+async def wipe(req: Request):
+    """Удаление всех напоминаний пользователя"""
+    try:
+        body = await req.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid_json")
+        
+    client_id = str(body.get("client_id", "")).strip()
+    if not client_id:
+        raise HTTPException(status_code=400, detail="missing_fields")
+
+    data = load_data()
+    data["reminders"] = [r for r in data.get("reminders", []) if r.get("client_id") != client_id]
+    save_data(data)
+    return {"ok": True}
+
+# ========== ФОНОВЫЕ ЗАДАЧИ ==========
+def check_reminders_loop():
+    """Поток для проверки и отправки напоминаний"""
     print("✅ Запущен поток проверки напоминаний")
     while True:
         try:
@@ -125,12 +284,12 @@ def check_reminders():
                 print("💾 Данные сохранены")
 
         except Exception as e:
-            print(f"❌ Ошибка в check_reminders: {e}")
+            print(f"❌ Ошибка в check_reminders_loop: {e}")
 
         time.sleep(3)
 
-def handle_updates():
-    """Обрабатывает входящие сообщения от Telegram"""
+def handle_updates_loop():
+    """Поток для обработки входящих сообщений Telegram"""
     offset = 0
     print("✅ Запущен поток обработки сообщений")
     
@@ -155,13 +314,10 @@ def handle_updates():
 
                 chat_id = msg["chat"]["id"]
                 text = msg.get("text", "").strip()
-                username = msg.get("from", {}).get("username", "нет username")
                 first_name = msg.get("from", {}).get("first_name", "пользователь")
 
-                print(f"📨 Сообщение от {first_name} (@{username}, id:{chat_id}): {text}")
+                print(f"📨 Сообщение от {first_name} (id:{chat_id}): {text}")
 
-                # ===== ВСЕ КОМАНДЫ РАБОТАЮТ ДЛЯ ВСЕХ =====
-                
                 # /start - подключение
                 if text.startswith("/start"):
                     parts = text.split(maxsplit=1)
@@ -202,15 +358,13 @@ def handle_updates():
                 elif text == "/myid":
                     tg_send_message(chat_id, 
                         f"🆔 <b>Твой chat_id:</b> <code>{chat_id}</code>\n"
-                        f"👤 Имя: {first_name}\n"
-                        f"📱 Username: @{username if username != 'нет username' else 'не указан'}"
+                        f"👤 Имя: {first_name}"
                     )
 
                 # /stats - статистика
                 elif text == "/stats":
                     data = load_data()
                     
-                    # Находим все напоминания пользователя
                     user_reminders = []
                     for r in data.get("reminders", []):
                         if r.get("chat_id") == chat_id:
@@ -232,7 +386,6 @@ def handle_updates():
                 elif text == "/clear_my":
                     data = load_data()
                     
-                    # Удаляем только напоминания этого пользователя
                     old_count = len([r for r in data.get("reminders", []) if r.get("chat_id") == chat_id])
                     data["reminders"] = [r for r in data.get("reminders", []) if r.get("chat_id") != chat_id]
                     
@@ -241,75 +394,34 @@ def handle_updates():
                         f"🧹 <b>Очищено!</b>\n"
                         f"Удалено {old_count} напоминаний."
                     )
-                    print(f"🧹 Пользователь {chat_id} очистил свои напоминания")
-
-                # /clear_all - очистить ВСЕ напоминания (тоже для всех, но с подтверждением)
-                elif text == "/clear_all":
-                    # Запрашиваем подтверждение
-                    tg_send_message(chat_id, 
-                        "⚠️ <b>ВНИМАНИЕ!</b>\n"
-                        "Ты собираешься удалить ВСЕ напоминания ВСЕХ пользователей!\n\n"
-                        "Если уверен, отправь:\n"
-                        "<code>/confirm_clear_all</code>"
-                    )
-
-                # /confirm_clear_all - подтверждение очистки всего
-                elif text == "/confirm_clear_all":
-                    data = load_data()
-                    total = len(data.get("reminders", []))
-                    data["reminders"] = []
-                    save_data(data)
-                    
-                    tg_send_message(chat_id, 
-                        f"💥 <b>Все напоминания удалены!</b>\n"
-                        f"Удалено записей: {total}"
-                    )
-                    print(f"💥 Пользователь {chat_id} очистил ВСЕ напоминания")
-
-                # Любое другое сообщение
-                elif not text.startswith("/"):
-                    tg_send_message(chat_id, 
-                        f"👋 Привет, {first_name}!\n"
-                        f"Используй /help чтобы увидеть список команд."
-                    )
 
         except Exception as e:
-            print(f"❌ Ошибка в handle_updates: {e}")
+            print(f"❌ Ошибка в handle_updates_loop: {e}")
             time.sleep(3)
 
-def main():
-    print("✅ Бот запускается...")
+# ========== ЗАПУСК ПРИ СТАРТЕ ==========
+@app.on_event("startup")
+async def startup_event():
+    """Действия при запуске приложения"""
+    print("🚀 Запуск Napomni API...")
     
-    # Создаем файл если нет
+    # Создаем файл данных если нет
     if not DATA_FILE.exists():
         save_data({"users": {}, "reminders": []})
         print("📁 Создан новый файл данных")
     
-    # Запускаем потоки
-    reminders_thread = threading.Thread(target=check_reminders, daemon=True)
-    reminders_thread.start()
+    # Запускаем фоновые потоки
+    thread1 = threading.Thread(target=check_reminders_loop, daemon=True)
+    thread1.start()
     
-    updates_thread = threading.Thread(target=handle_updates, daemon=True)
-    updates_thread.start()
+    thread2 = threading.Thread(target=handle_updates_loop, daemon=True)
+    thread2.start()
     
-    print("✅ Бот успешно запущен!")
-    print("📢 Все команды доступны всем пользователям")
+    print("✅ Фоновые задачи запущены")
     print("=" * 50)
-    print("Команды:")
-    print("  /start [код] - подключить аккаунт")
-    print("  /myid - показать мой chat_id")
-    print("  /stats - статистика моих напоминаний")
-    print("  /clear_my - очистить мои напоминания")
-    print("  /clear_all - очистить ВСЕ напоминания")
-    print("  /help - помощь")
-    print("=" * 50)
-    
-    # Держим главный поток живым
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        print("\n👋 Бот остановлен")
 
+# Для локального запуска
 if __name__ == "__main__":
-    main()
+    import uvicorn
+    print("🚀 Локальный запуск сервера...")
+    uvicorn.run(app, host="0.0.0.0", port=8000)
