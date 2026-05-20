@@ -1,2 +1,2 @@
-aiogram==3.21.0
-yt-dlp==2026.05.12
+aiogram
+yt-dlp
