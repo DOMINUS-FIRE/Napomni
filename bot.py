@@ -2,7 +2,6 @@ import os
 import uuid
 import shutil
 import asyncio
-import subprocess
 from pathlib import Path
 
 from aiohttp import web
@@ -46,49 +45,7 @@ def is_supported_link(text: str) -> bool:
     return any(domain in text.lower() for domain in domains)
 
 
-def get_file_size_mb(path: Path) -> float:
-    return path.stat().st_size / 1024 / 1024
-
-
-def compress_video(input_file: Path, output_file: Path):
-    command = [
-        "ffmpeg",
-        "-y",
-        "-i", str(input_file),
-        "-vcodec", "libx264",
-        "-crf", "32",
-        "-preset", "veryfast",
-        "-acodec", "aac",
-        "-b:a", "96k",
-        "-movflags", "+faststart",
-        str(output_file)
-    ]
-
-    subprocess.run(
-        command,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
-    )
-
-
-def extract_audio(video_file: Path, audio_file: Path):
-    command = [
-        "ffmpeg",
-        "-y",
-        "-i", str(video_file),
-        "-vn",
-        "-ab", "192k",
-        str(audio_file)
-    ]
-
-    subprocess.run(
-        command,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
-    )
-
-
-def download_video(url: str):
+def download_content(url: str):
     unique_id = str(uuid.uuid4())
 
     folder = DOWNLOADS / unique_id
@@ -98,8 +55,7 @@ def download_video(url: str):
 
     ydl_opts = {
         "outtmpl": video_template,
-        "format": "bestvideo+bestaudio/best",
-        "merge_output_format": "mp4",
+        "format": "best",
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
@@ -111,67 +67,25 @@ def download_video(url: str):
     video_file = None
 
     for file in folder.iterdir():
-        if file.suffix.lower() in [".mp4", ".mkv", ".webm", ".mov"]:
+        if file.suffix.lower() in [
+            ".mp4",
+            ".webm",
+            ".mkv",
+            ".mov"
+        ]:
             video_file = file
             break
 
     if not video_file:
         raise Exception("Видео не найдено")
 
-    final_video = video_file
-
-    # Конвертация в mp4 если нужно
-    if video_file.suffix.lower() != ".mp4":
-        converted = folder / "converted.mp4"
-
-        command = [
-            "ffmpeg",
-            "-y",
-            "-i", str(video_file),
-            "-vcodec", "libx264",
-            "-acodec", "aac",
-            "-movflags", "+faststart",
-            str(converted)
-        ]
-
-        subprocess.run(
-            command,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
+    if video_file.stat().st_size > MAX_TELEGRAM_SIZE:
+        raise Exception(
+            f"Видео слишком большое "
+            f"({round(video_file.stat().st_size / 1024 / 1024, 1)} MB)"
         )
 
-        if converted.exists():
-            final_video = converted
-
-    # Сжатие если файл слишком большой
-    if final_video.stat().st_size > MAX_TELEGRAM_SIZE:
-        compressed_video = folder / "compressed.mp4"
-
-        compress_video(final_video, compressed_video)
-
-        if not compressed_video.exists():
-            raise Exception("Ошибка сжатия видео")
-
-        if compressed_video.stat().st_size > MAX_TELEGRAM_SIZE:
-            raise Exception(
-                f"Видео слишком большое даже после сжатия "
-                f"({get_file_size_mb(compressed_video):.1f} MB)"
-            )
-
-        final_video = compressed_video
-
-    # Извлечение аудио
-    audio_file = folder / "audio.mp3"
-
-    extract_audio(final_video, audio_file)
-
-    if not audio_file.exists():
-        audio_file = None
-
-    elif audio_file.stat().st_size > MAX_TELEGRAM_SIZE:
-        audio_file = None
-
-    return folder, final_video, audio_file
+    return folder, video_file
 
 
 @dp.message(F.text)
@@ -192,8 +106,8 @@ async def handle_link(message: Message):
     folder = None
 
     try:
-        folder, video_file, audio_file = await asyncio.to_thread(
-            download_video,
+        folder, video_file = await asyncio.to_thread(
+            download_content,
             url
         )
 
@@ -204,18 +118,6 @@ async def handle_link(message: Message):
             supports_streaming=True
         )
 
-        if audio_file:
-            await status.edit_text("🎧 Отправляю аудио...")
-
-            await message.answer_audio(
-                audio=FSInputFile(audio_file)
-            )
-
-        else:
-            await message.answer(
-                "⚠️ Аудио слишком большое или не удалось извлечь"
-            )
-
         await status.edit_text("✅ Готово")
 
     except Exception as e:
@@ -224,12 +126,11 @@ async def handle_link(message: Message):
         )
 
     finally:
-        # Удаление файлов после отправки
         if folder and folder.exists():
             shutil.rmtree(folder, ignore_errors=True)
 
 
-# Фейковый веб-сервер для Render
+# Render web server
 async def healthcheck(request):
     return web.Response(text="Bot is running")
 
